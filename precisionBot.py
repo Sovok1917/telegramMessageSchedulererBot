@@ -49,11 +49,26 @@ async def handleGetChatId(event):
 @telegramClient.on(events.NewMessage(pattern=r'/sync'))
 async def handleSyncCommand(event):
     """
-    Validates clock synchronization by reading Telethon's internal MTProto time offset.
-    An offset of 0 indicates your local Chrony NTP clock is perfectly aligned with Telegram.
+    Validates clock synchronization by comparing local UTC time
+    to the Telegram server's timestamp of this exact message.
     """
-    offset = telegramClient.session.time_offset
-    await event.reply(f"Local clock offset from Telegram: {offset} seconds.")
+    serverTime = event.date
+
+    localTime = datetime.now(serverTime.tzinfo)
+
+    diff = (localTime - serverTime).total_seconds()
+
+    if abs(diff) <= 2:
+        status = "✅ System clock is perfectly synced with Telegram!"
+    else:
+        status = "⚠️ Warning: System clock appears to be out of sync."
+
+    await event.reply(
+        f"{status}\n"
+        f"Server Time: {serverTime.strftime('%H:%M:%S')}\n"
+        f"Local Time: {localTime.strftime('%H:%M:%S')}\n"
+        f"Offset: {diff:.2f} seconds"
+    )
 
 @telegramClient.on(events.NewMessage(pattern=r'/send'))
 async def handleScheduleCommand(event):
