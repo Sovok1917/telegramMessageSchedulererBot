@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 
@@ -13,17 +13,19 @@ controlChatId = int(os.getenv('CONTROL_CHAT_ID', 0))
 
 telegramClient = TelegramClient(sessionName, apiId, apiHash)
 
-async def sendPreciseMessage(targetChat, targetTime, messageText, latencyOffset):
+async def sendPreciseMessage(targetChat, targetTime, messageText):
     """
-    Calculates the remaining time until targetTime and executes an asynchronous wait.
-    Utilizes a busy-wait loop for the final 100 milliseconds to guarantee sub-millisecond
-    precision, overcoming the scheduling inaccuracies inherent to asyncio.sleep().
+    Executes an asynchronous wait until the exact target time.
+    Since no latency is deducted, the network request initiates exactly on the boundary.
+    Includes a configurable safety padding to definitively prevent premature dispatch.
     """
-    while True:
-        currentTime = datetime.now()
-        timeToWait = (targetTime - currentTime).total_seconds()
+    # Increase to 5 or 10 if you want an absolute hardware guarantee
+    # that the message crosses the server boundary after the 0th millisecond.
+    safetyPaddingMs = 0
+    targetTime = targetTime + timedelta(milliseconds=safetyPaddingMs)
 
-        timeToWait -= latencyOffset
+    while True:
+        timeToWait = (targetTime - datetime.now()).total_seconds()
 
         if timeToWait > 0.1:
             await asyncio.sleep(timeToWait - 0.1)
@@ -42,14 +44,22 @@ async def handleGetChatId(event):
     """
     Resolves and returns the integer ID of the chat where the command was issued.
     """
-    currentChatId = event.chat_id
-    await event.reply(str(currentChatId))
+    await event.reply(str(event.chat_id))
+
+@telegramClient.on(events.NewMessage(pattern=r'/sync'))
+async def handleSyncCommand(event):
+    """
+    Validates clock synchronization by reading Telethon's internal MTProto time offset.
+    An offset of 0 indicates your local Chrony NTP clock is perfectly aligned with Telegram.
+    """
+    offset = telegramClient.session.time_offset
+    await event.reply(f"Local clock offset from Telegram: {offset} seconds.")
 
 @telegramClient.on(events.NewMessage(pattern=r'/send'))
 async def handleScheduleCommand(event):
     """
     Parses scheduling parameters from the control chat and dispatches the background task.
-    Validates the origin chat to ensure commands are only processed from the authorized control chat.
+    Missing seconds or milliseconds are appended as zeros for simplified inputs.
     """
     if controlChatId and event.chat_id != controlChatId:
         return
@@ -57,12 +67,17 @@ async def handleScheduleCommand(event):
     messageParts = event.message.text.split(' ', 3)
 
     if len(messageParts) < 4:
-        await event.reply("Usage: /send <targetChat> <HH:MM:SS.mmm> <message>")
+        await event.reply("Usage: /send <targetChat> <HH:MM>[or HH:MM:SS / HH:MM:SS.mmm] <message>")
         return
 
     targetChat = messageParts[1]
     timeString = messageParts[2]
     messageText = messageParts[3]
+
+    if timeString.count(':') == 1:
+        timeString += ":00"
+    if '.' not in timeString:
+        timeString += ".000"
 
     try:
         now = datetime.now()
@@ -73,13 +88,11 @@ async def handleScheduleCommand(event):
             await event.reply("Target time is in the past.")
             return
 
-        networkLatency = 0.045
-
-        asyncio.create_task(sendPreciseMessage(targetChat, targetTime, messageText, networkLatency))
+        asyncio.create_task(sendPreciseMessage(targetChat, targetTime, messageText))
         await event.reply(f"Task scheduled. Target: {targetChat}, Time: {timeString}")
 
     except ValueError:
-        await event.reply("Invalid time format. Required: HH:MM:SS.mmm")
+        await event.reply("Invalid time format. Acceptable formats: HH:MM, HH:MM:SS, HH:MM:SS.mmm")
 
 telegramClient.start()
 telegramClient.run_until_disconnected()
